@@ -1,4 +1,9 @@
 # Boundary-modification
+
+确保安装以下package
+
+pip install PyQt5 SimpleITK numpy scikit-image opencv-python
+
 直接运行程序
 
 shift+左键-移动
