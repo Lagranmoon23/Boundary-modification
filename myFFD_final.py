@@ -4,7 +4,8 @@ import SimpleITK as sitk
 import os
 from PyQt5.QtWidgets import (QApplication, QWidget, QPushButton, QDesktopWidget,
                              QHBoxLayout, QVBoxLayout, QMenu, QAction, QFileDialog,
-                             QLabel, QSizePolicy, QCheckBox, QScrollArea, QSlider)
+                             QLabel, QSizePolicy, QCheckBox, QScrollArea, QSlider,
+                             QDoubleSpinBox) # Import QDoubleSpinBox
 from PyQt5.QtGui import QIcon, QImage, QPixmap, QKeyEvent, QPainter, QPen, QBrush
 from PyQt5.QtCore import QPoint, Qt, QEvent, pyqtSignal, QRect, QSize, QPointF
 
@@ -35,9 +36,9 @@ def is_integer_pixel_type(pixel_id):
 class SliceDisplayLabel(QLabel):
     composition_changed = pyqtSignal(list)
 
-    # Constants for local deformation
+    # Default Constants for local deformation
     DEFAULT_INFLUENCE_RADIUS_IMAGE = 30.0 # Default influence radius in image pixels
-    DEFAULT_FALLOFF_POWER = 2.0         # Default power for the fall-off function (e.g., 1.0 for linear, 2.0 for quadratic)
+    DEFAULT_FALLOFF_POWER = 2.0         # Default power for the fall-off function
 
 
     def __init__(self, parent=None):
@@ -57,6 +58,11 @@ class SliceDisplayLabel(QLabel):
         # Stores (layer_index_in_composited_layers, contour_index, point_index) of the selected point
         self._selected_point = None
 
+        # Instance variables for editable parameters, initialized from defaults
+        # These will be updated by MainWindow via set methods
+        self._influence_radius = self.DEFAULT_INFLUENCE_RADIUS_IMAGE
+        self._falloff_power = self.DEFAULT_FALLOFF_POWER # Falloff power is not user editable yet
+
         self.setAlignment(Qt.AlignCenter)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.setStyleSheet("border: 1px solid green;")
@@ -65,20 +71,40 @@ class SliceDisplayLabel(QLabel):
         self.setMouseTracking(True)
         self.setEnabled(True)
 
-    def set_composition_data(self, visible_images_data_list):
-        self._visible_images_data_refs = visible_images_data_list
-        # Clear dragging and selection states as the layers might have changed or reordered
-        # Also clear them if the previously selected layer is no longer visible.
-        if self._selected_point is not None:
-             layer_index_in_composited = self._selected_point[0]
-             if layer_index_in_composited >= len(self._composited_layers): # Check against OLD composited layers first
-                  self._selected_point = None
-                  self._is_dragging = False
+    # --- Public methods to set parameters from outside ---
+    def set_influence_radius(self, radius: float):
+        """Sets the influence radius for point dragging."""
+        if radius > 0:
+            self._influence_radius = radius
+            # print(f"Influence radius set to {self._influence_radius}")
 
-             # Re-find the layer index in the NEW list if needed to preserve selection?
-             # This is complex, skipping for now. Clear selection on any composition change.
-             self._selected_point = None
-             self._is_dragging = False
+    def set_falloff_power(self, power: float):
+        """Sets the fall-off power for point dragging."""
+        if power >= 0: # Power can be 0 (no falloff within radius)
+            self._falloff_power = power
+            # print(f"Falloff power set to {self._falloff_power}")
+
+    # --- New method to clear selection and dragging state ---
+    def clear_selection_and_dragging(self):
+        """Clears the currently selected point and dragging state."""
+        # Check if a selection or dragging was active to avoid unnecessary updates
+        if self._is_dragging or self._selected_point is not None:
+            self._is_dragging = False
+            self._selected_point = None
+            # Trigger a repaint to remove the visual highlight of the selected point
+            self.update()
+
+
+    # --- Keep existing methods below ---
+
+    def set_composition_data(self, visible_images_data_list):
+        old_composited_layers = self._composited_layers
+
+        self._visible_images_data_refs = visible_images_data_list
+        # Clear dragging and selection states on composition change - Important!
+        # This is necessary because the composited layers might change order or content,
+        # making the old _selected_point index potentially invalid.
+        self.clear_selection_and_dragging() # Use the new method here
 
 
         if not self._visible_images_data_refs:
@@ -90,7 +116,7 @@ class SliceDisplayLabel(QLabel):
             self.setText("Axial (Z) View")
 
         else:
-             if not self._composited_layers:
+             if not old_composited_layers:
                   self._pan_offset = QPoint(0, 0)
                   self._zoom_factor = 1.0
 
@@ -144,10 +170,7 @@ class SliceDisplayLabel(QLabel):
 
 
                  if not pixmap.isNull():
-                     # Store pixmap, opacity, is_mask, contours, and *index in self._visible_images_data_refs*
-                     # This index links back to the original image_data dictionary
                      self._composited_layers.append((pixmap, opacity, is_mask, contours_for_slice, img_data_index_in_visible_list))
-
 
                      if current_composite_original_size.isEmpty():
                          current_composite_original_size = pixmap.size()
@@ -169,6 +192,7 @@ class SliceDisplayLabel(QLabel):
         self.update()
         self.composition_changed.emit(self._visible_images_data_refs)
 
+
     def get_qpixmap_from_slice_array(self, slice_array, window_level=None, window_width=None):
         if slice_array is None or slice_array.size == 0:
             return QPixmap()
@@ -178,15 +202,16 @@ class SliceDisplayLabel(QLabel):
             if window_level is not None and window_width is not None:
                  if window_width <= 0:
                      level_val = float(window_level)
-                     processed_slice = np.full(processed_slice.shape, 255.0 if level_val <= np.mean(processed_slice) else 0.0)
+                     mean_val = np.mean(processed_slice) if processed_slice.size > 0 else 0
+                     processed_slice = np.full(processed_slice.shape, 255.0 if level_val <= mean_val else 0.0)
                  else:
                      min_val = float(window_level) - float(window_width) / 2.0
                      max_val = float(window_level) + float(window_width) / 2.0
                      processed_slice = (processed_slice - min_val) / float(window_width)
                      processed_slice = np.clip(processed_slice * 255.0, 0, 255)
             else:
-                 img_min = np.min(processed_slice)
-                 img_max = np.max(processed_slice)
+                 img_min = np.min(processed_slice) if processed_slice.size > 0 else 0
+                 img_max = np.max(processed_slice) if processed_slice.size > 0 else 0
                  if img_max - img_min == 0:
                       processed_slice = np.full(processed_slice.shape, 128.0)
                  else:
@@ -198,6 +223,7 @@ class SliceDisplayLabel(QLabel):
             bytesPerLine = width * 1
             if not scaled_slice.flags['C_CONTIGUOUS']:
                  scaled_slice = np.ascontiguousarray(scaled_slice)
+
             q_image = QImage(scaled_slice.data, width, height, bytesPerLine, QImage.Format_Grayscale8)
             pixmap = QPixmap.fromImage(q_image)
             return pixmap
@@ -208,8 +234,8 @@ class SliceDisplayLabel(QLabel):
                  print(f"  Window Level: {window_level}, Window Width: {window_width}")
             return QPixmap()
 
+
     def image_to_screen(self, point_image: QPointF) -> QPointF:
-        """ Transforms a point from image coordinates (x, y) to screen coordinates (x, y). """
         if self._scaled_pixmap_size.isEmpty() or self._zoom_factor <= 0:
             return QPointF()
 
@@ -228,8 +254,8 @@ class SliceDisplayLabel(QLabel):
 
         return QPointF(screen_x, screen_y)
 
+
     def screen_to_image(self, point_screen: QPointF) -> QPointF:
-        """ Transforms a point from screen coordinates (x, y) to image coordinates (x, y). """
         if self._scaled_pixmap_size.isEmpty() or self._zoom_factor <= 0:
             return QPointF()
 
@@ -247,6 +273,7 @@ class SliceDisplayLabel(QLabel):
         image_y = (point_screen.y() - target_origin.y()) / scale_y if scale_y != 0 else 0.0
 
         return QPointF(image_x, image_y)
+
 
     def paintEvent(self, event):
         painter = QPainter(self)
@@ -280,7 +307,8 @@ class SliceDisplayLabel(QLabel):
                         for contour_index, contour in enumerate(contours):
                              if contour.shape[0] > 1:
                                  contour_points_screen = [self.image_to_screen(QPointF(pt[0], pt[1])) for pt in contour]
-                                 painter.drawPolyline(*contour_points_screen)
+                                 if contour_points_screen:
+                                     painter.drawPolyline(*contour_points_screen)
 
                                  # Draw points
                                  painter.setPen(QPen(point_color, 1.0))
@@ -304,6 +332,9 @@ class SliceDisplayLabel(QLabel):
         else:
             painter.setOpacity(1.0)
             painter.drawText(self.contentsRect(), Qt.AlignCenter, self.text())
+
+        painter.end()
+
 
     def mousePressEvent(self, event):
         if event.modifiers() == Qt.ShiftModifier:
@@ -346,11 +377,9 @@ class SliceDisplayLabel(QLabel):
                                          event.accept()
                                          return
 
-
              super().mousePressEvent(event)
 
 
-    # --- 修正: mouseMoveEvent 只更新轮廓点位置 ---
     def mouseMoveEvent(self, event):
         if self._is_panning:
             if event.buttons() == Qt.LeftButton and event.modifiers() == Qt.ShiftModifier:
@@ -380,8 +409,10 @@ class SliceDisplayLabel(QLabel):
                          dragged_point_image_coords = np.copy(contours_for_slice[contour_index][point_index])
 
                          # --- Apply Local Elastic Deformation to points in the same contour ---
-                         influence_radius = self.DEFAULT_INFLUENCE_RADIUS_IMAGE
-                         falloff_power = self.DEFAULT_FALLOFF_POWER
+                         # Use the instance variable for influence radius
+                         influence_radius = self._influence_radius
+                         # Use the instance variable for falloff power (even if not user editable yet)
+                         falloff_power = self._falloff_power
 
                          contour_array_to_modify = contours_for_slice[contour_index]
 
@@ -402,15 +433,14 @@ class SliceDisplayLabel(QLabel):
 
                          self._last_mouse_pos = event.pos()
 
-                         # Trigger a repaint (This updates the contour drawing ONLY)
-                         self.update()
+                         self.update() # Update contour drawing
                          event.accept()
 
 
         elif self._is_zooming:
             if event.buttons() == Qt.RightButton and event.modifiers() == Qt.ShiftModifier:
-                 delta_y = event.pos().y() - self._last_mouse_pos.y()
-                 zoom_step = delta_y * 0.005
+                 delta_y_screen = event.pos().y() - self._last_mouse_pos.y()
+                 zoom_step = delta_y_screen * 0.005
                  self._zoom_factor += zoom_step
                  self._zoom_factor = max(0.1, min(self._zoom_factor, 20.0))
                  self._last_mouse_pos = event.pos()
@@ -420,10 +450,9 @@ class SliceDisplayLabel(QLabel):
             super().mouseMoveEvent(event)
 
 
-    # --- 修正: mouseReleaseEvent 添加 Mask 数据更新逻辑 ---
     def mouseReleaseEvent(self, event):
-        # Store dragging state before resetting
         was_dragging = self._is_dragging
+        selected_point_info_at_release = self._selected_point
 
         if self._is_panning and event.button() == Qt.LeftButton:
             self._is_panning = False
@@ -433,42 +462,31 @@ class SliceDisplayLabel(QLabel):
              event.accept()
         # --- End Point Dragging ---
         elif was_dragging and event.button() == Qt.LeftButton:
-            self._is_dragging = False # End dragging mode
-            # Optional: Keep point selected after drag ends? For now, deselect.
-            selected_point_info = self._selected_point # Get info before clearing
-            self._selected_point = None
+            self._is_dragging = False
+            self._selected_point = None # Deselect point visually
 
-            # --- Trigger Mask Data Update After Drag Ends ---
-            if selected_point_info is not None:
-                 layer_index_in_composited, contour_index, point_index = selected_point_info
+            # --- Trigger Mask Data Update AFTER Drag Ends ---
+            if selected_point_info_at_release is not None:
+                 layer_index_in_composited, contour_index, point_index = selected_point_info_at_release
 
-                 # Ensure the layer index is still valid
                  if layer_index_in_composited < len(self._composited_layers):
                       img_data_ref = self._visible_images_data_refs[layer_index_in_composited]
                       current_slice_index = img_data_ref.get('current_slice_index', 0)
 
-                      # Call method to update mask pixel data for this slice
                       self._update_mask_slice_pixels(img_data_ref, current_slice_index)
 
-            # --- End Mask Data Update ---
-
-            # Trigger a full display update to show potentially updated pixels AND clear selection highlight
-            self._update_composition() # This will regenerate pixmap from updated sitk image
+            self._update_composition() # Update display to show potentially updated pixels and clear selection
             event.accept()
 
         else:
             super().mouseReleaseEvent(event)
 
-    # --- 新增: 更新 Mask 像素数据的方法 ---
+    # --- Method to Update Mask Pixel Data ---
     def _update_mask_slice_pixels(self, img_data_ref, slice_index_to_update):
-        """
-        Rasterizes contours for a specific slice onto a blank array,
-        creates a new SITK image from the modified array copy, and updates the image_data reference.
-        Assumes binary mask (0 or 1).
-        """
         print(f"Updating mask pixel data for slice {slice_index_to_update}...")
         if cv2 is None:
             print("Mask pixel update requires OpenCV, but it is not available.")
+            print("Please install it using: pip install opencv-python")
             return
 
         sitk_image = img_data_ref.get('sitk_image')
@@ -477,159 +495,200 @@ class SliceDisplayLabel(QLabel):
             return
 
         try:
-            # Get a COPY of the image array (crucial if view is read-only)
-            image_array_3d = sitk.GetArrayFromImage(sitk_image)
+            image_array_3d = sitk.GetArrayFromImage(sitk_image) # Get a COPY
         except Exception as e:
             print(f"Error getting image array copy for mask update: {e}")
             return
 
         img_dimension = image_array_3d.ndim
 
-        # Determine shape, dtype, and access the correct slice in the array COPY
         if img_dimension >= 3:
-            slice_shape = image_array_3d.shape[1:] # (height, width)
+            if slice_index_to_update < 0 or slice_index_to_update >= image_array_3d.shape[0]:
+                 print(f"Error: Invalid slice index {slice_index_to_update} for mask update (dimension {img_dimension}).")
+                 return
+            slice_shape = image_array_3d.shape[1:]
             slice_dtype = image_array_3d.dtype
-            # Get a mutable view of the slice within the COPY
             current_slice_array_in_copy = image_array_3d[slice_index_to_update, :, :]
         elif img_dimension == 2:
-            slice_shape = image_array_3d.shape # (height, width)
+            if slice_index_to_update != 0:
+                 print(f"Error: Invalid slice index {slice_index_to_update} for 2D mask update.")
+                 return
+            slice_shape = image_array_3d.shape
             slice_dtype = image_array_3d.dtype
-            slice_index_to_update = 0 # Ensure we process the only slice
-            # Get a mutable view of the 2D array COPY itself
+            slice_index_to_update = 0
             current_slice_array_in_copy = image_array_3d
 
 
-        # Create a temporary blank slice array with the same shape and dtype
         temp_mask_slice = np.zeros(slice_shape, dtype=slice_dtype)
 
-        # Get all contours for the current slice from the cache
-        # Use the potentially modified contours from img_data_ref['contours'][slice_index_to_update]
         all_contours_on_slice = img_data_ref.get('contours', {}).get(slice_index_to_update, [])
 
-        # Prepare contours for OpenCV fillPoly
-        # cv2.fillPoly expects a list of contours, where each contour is shape (N, 1, 2) and dtype np.int32
-        # Filter contours with less than 2 points
         contours_cv2_format = [c.reshape(-1, 1, 2).astype(np.int32) for c in all_contours_on_slice if c.shape[0] > 1]
 
         if contours_cv2_format:
             try:
-                # Assuming binary mask (0/1), fill with 1.
-                # Fill color should be the foreground label. If multi-label, this is complex.
                 fill_color = 1 # Assuming binary mask foreground is 1
-
-                # Use the temporary blank slice for filling
                 cv2.fillPoly(temp_mask_slice, contours_cv2_format, color=fill_color)
 
-                # Copy the filled binary data back to the slice in the 3D array COPY
-                # This modifies the image_array_3d COPY
                 if temp_mask_slice.shape == current_slice_array_in_copy.shape:
                      current_slice_array_in_copy[:, :] = temp_mask_slice[:, :]
                 else:
-                     print(f"Shape mismatch during mask update: temp_mask_slice {temp_mask_slice.shape} vs current_slice_array_in_copy {current_slice_array_in_copy.shape}")
-
+                     print(f"Shape mismatch during mask update: temp_mask_slice {temp_mask_slice.shape} vs current_slice_array_in_copy {current_slice_array_in_copy.shape}. Mask update failed.")
 
             except Exception as fill_e:
                 print(f"Error filling contours for mask pixel update (slice {slice_index_to_update}): {fill_e}")
-                # Continue even if filling fails, just don't update the pixel data
 
-
-        # --- Create a NEW SimpleITK image from the modified 3D array COPY ---
         try:
              new_sitk_image = sitk.GetImageFromArray(image_array_3d)
-             # Copy metadata (Origin, Spacing, Direction) from the old image to the new one
              new_sitk_image.CopyInformation(sitk_image)
 
-             # Replace the old sitk image object reference with the new one
              img_data_ref['sitk_image'] = new_sitk_image
-             print(f"Mask pixel data updated for slice {slice_index_to_update}.")
+             print(f"Mask pixel data updated successfully for slice {slice_index_to_update}.")
 
         except Exception as create_image_e:
-             print(f"Error creating new SITK image from modified array: {create_image_e}")
+             print(f"Error creating or updating SITK image from modified array: {create_image_e}")
              print("Mask pixel data update failed.")
 
 
+    # SliceDisplayLabel's own wheelEvent - passes event up
+    # This method itself doesn't contain the slicing logic
     def wheelEvent(self, event):
-        # Existing wheel event for slicing
-        # Clear selection and dragging on slice change
-        self._is_dragging = False
-        self._selected_point = None
+        # Existing wheel event for slicing - just passes the event up to the parent (MainWindow)
+        # Clearing selection and dragging state on wheel is handled by MainWindow's wheelEvent now
         super().wheelEvent(event)
 
 
 # --- MainWindow Class ---
 class MainWindow(QWidget):
+    IMAGE_FILE_FILTERS = "医学图像文件 (*.nrrd *.mha);;所有文件 (*)"
+
     def __init__(self):
         super().__init__()
         self.loaded_images = []
         self.initUI()
 
     def initUI(self):
+        print("MainWindow.initUI: Starting UI initialization...")
+        # 设置窗口标题、位置和图标
         self.setWindowTitle("边界修改")
         self.setGeometry(100, 100, 1500, 800)
-        self.setWindowIcon(QIcon("icon1.png"))
+        # 请检查 'icon/icon1.png' 文件是否存在，路径是否正确，以及是否是有效的图像文件
+        self.setWindowIcon(QIcon("icon/icon1.png"))
+        print("MainWindow.initUI: Window title, geometry, icon set.")
 
+        # 居中窗口
+        print("MainWindow.initUI: Setting window position...")
         cnter_pos = QDesktopWidget().screenGeometry().center()
         self.move(int(cnter_pos.x() - self.width()/2), int(cnter_pos.y() - self.height()/2))
+        print("MainWindow.initUI: Window position set.")
 
+        # --- 设置主布局 ---
+        print("MainWindow.initUI: Setting up main layout...")
         main_h_layout = QHBoxLayout(self)
+        print("MainWindow.initUI: Main layout setup complete.")
 
+        # --- 设置左侧侧边栏布局 ---
+        print("MainWindow.initUI: Setting up left sidebar layout...")
         left_v_layout = QVBoxLayout()
         button_layout = QHBoxLayout()
-        button1 = QPushButton("导入")
-        button1.setFixedSize(75, 25)
-        button2 = QPushButton("提取边缘")
-        button2.setFixedSize(75, 25)
-        button_layout.addWidget(button1)
-        button_layout.addWidget(button2)
+        button_import = QPushButton("导入")
+        button_import.setFixedSize(75, 25)
+        button_extract = QPushButton("提取边缘")
+        button_extract.setFixedSize(75, 25)
+        button_layout.addWidget(button_import)
+        button_layout.addWidget(button_extract)
         button_layout.addStretch(1)
         left_v_layout.addLayout(button_layout)
+        print("MainWindow.initUI: Left sidebar buttons setup complete.")
 
+        # --- 添加衰减半径控制 ---
+        print("MainWindow.initUI: Setting up radius control...")
+        radius_layout = QHBoxLayout()
+        radius_label = QLabel("衰减半径(默认30像素):")
+        self.radius_spinbox = QDoubleSpinBox()
+        self.radius_spinbox.setRange(1.0, 500.0) # 设置一个合理的范围
+        self.radius_spinbox.setSingleStep(5.0)  # 步长
+        self.radius_spinbox.setDecimals(1)      # 小数位数
+        # 从 SliceDisplayLabel 的默认常量设置初始值
+        self.radius_spinbox.setValue(SliceDisplayLabel.DEFAULT_INFLUENCE_RADIUS_IMAGE)
+        radius_layout.addWidget(radius_label)
+        radius_layout.addWidget(self.radius_spinbox)
+        left_v_layout.addLayout(radius_layout) # 将半径控制添加到按钮下方
+        print("MainWindow.initUI: Radius control setup complete.")
+
+        # --- 设置图像列表滚动区域 ---
+        print("MainWindow.initUI: Setting up image list scroll area...")
         self.image_list_scroll_area = QScrollArea()
         self.image_list_scroll_area.setWidgetResizable(True)
-        self.image_list_widget = QWidget()
-        self.image_list_layout = QVBoxLayout(self.image_list_widget)
-        self.image_list_layout.setAlignment(Qt.AlignTop | Qt.AlignLeft)
-        self.image_list_layout.addStretch(1)
+        self.image_list_widget = QWidget() # 用于容纳图像列表项的 widget
+        self.image_list_layout = QVBoxLayout(self.image_list_widget) # 列表项的布局
+        self.image_list_layout.setAlignment(Qt.AlignTop | Qt.AlignLeft) # 顶部左侧对齐
+        self.image_list_layout.addStretch(1) # 添加 stretch 将内容顶到顶部
+        # 修复：将 image_list_widget 设置为滚动区域的 widget
         self.image_list_scroll_area.setWidget(self.image_list_widget)
-        left_v_layout.addWidget(self.image_list_scroll_area, 1)
+        left_v_layout.addWidget(self.image_list_scroll_area, 1) # 将滚动区域添加到左侧布局
+        print("MainWindow.initUI: Image list scroll area setup complete.")
 
+
+        # --- 设置右侧显示区域布局 ---
+        print("MainWindow.initUI: Setting up right display area...")
         right_v_layout = QVBoxLayout()
+        # 创建 SliceDisplayLabel 实例，这会调用 SliceDisplayLabel 的 __init__
         self.axial_view_label = SliceDisplayLabel()
+        # 如果程序在创建 SliceDisplayLabel 实例时出错，会在上一步的 try/except 块中捕获
+        print("MainWindow.initUI: SliceDisplayLabel instance creation attempted.") # 添加此行以确认是否到达这里
 
         self.axial_slice_info_label = QLabel("切片: -- / --")
         self.axial_slice_info_label.setAlignment(Qt.AlignCenter)
 
         right_v_layout.addWidget(self.axial_view_label, 1)
         right_v_layout.addWidget(self.axial_slice_info_label)
+        print("MainWindow.initUI: Right display area setup complete.")
 
+        # --- 设置主窗口布局 ---
+        print("MainWindow.initUI: Setting main window layout...")
         main_h_layout.addLayout(left_v_layout, 1)
         main_h_layout.addLayout(right_v_layout, 2)
+        self.setLayout(main_h_layout) # 设置主布局
+        print("MainWindow.initUI: Main window layout set.")
 
-        self.setLayout(main_h_layout)
+        # --- 设置窗口最小尺寸 ---
+        print("MainWindow.initUI: Setting minimum size...")
+        self.setMinimumSize(self.sizeHint()) # 根据布局内容计算建议的最小尺寸
+        print("MainWindow.initUI: Minimum size set.")
 
-        self.setMinimumSize(self.sizeHint())
-
-        file_menu = QMenu(self)
-        import_action = QAction("导入", self)
-        file_menu.addAction(import_action)
-
-        import_action.triggered.connect(self.import_file)
-
-        button1.clicked.connect(self.import_file)
-
-        button2.clicked.connect(self.extract_edges_action)
-
+        # --- 连接信号和槽 ---
+        print("MainWindow.initUI: Connecting signals and slots...")
+        button_import.clicked.connect(self.import_file)
+        button_extract.clicked.connect(self.extract_edges_action)
         self.axial_view_label.composition_changed.connect(self.update_info_labels)
+        # 将半径 SpinBox 的值变化信号连接到 SliceDisplayLabel 的设置半径方法
+        self.radius_spinbox.valueChanged.connect(self.axial_view_label.set_influence_radius)
+        print("MainWindow.initUI: Signals and slots connected.")
+
+        print("MainWindow.initUI: UI initialization complete.")
+
+
+    # --- Helper method to update item control states ---
+    def _update_item_control_states(self, image_data):
+        """Enables/disables item sliders based on visibility and mask status."""
+        is_visible = image_data['is_visible']
+        is_mask = image_data.get('is_mask', False)
+
+        image_data['slider_opacity'].setEnabled(is_visible)
+        image_data['slider_ww'].setEnabled(is_visible and not is_mask)
+        image_data['slider_wl'].setEnabled(is_visible and not is_mask)
 
 
     def import_file(self, checked=False):
         options = QFileDialog.Options()
         options |= QFileDialog.DontUseNativeDialog
+        filters = self.IMAGE_FILE_FILTERS
         file_paths, _ = QFileDialog.getOpenFileNames(
             self,
             "选择要导入的医学图像",
             "",
-            "医学图像文件 (*.nrrd *.mha);;所有文件 (*)",
+            filters,
             options=options
         )
 
@@ -715,9 +774,6 @@ class MainWindow(QWidget):
                     ww_slider.setRange(0, 100)
                     ww_slider.setValue(ww_slider_initial_value)
                     ww_slider.setToolTip(f"调节窗宽 ({initial_width:.2f})")
-                    if is_mask:
-                         ww_slider.setEnabled(False)
-                         ww_slider.setToolTip("Mask图像无需窗宽调节")
                     ww_h_layout.addWidget(ww_label)
                     ww_h_layout.addWidget(ww_slider)
                     controls_v_layout.addLayout(ww_h_layout)
@@ -732,9 +788,6 @@ class MainWindow(QWidget):
                     wl_slider.setRange(0, 100)
                     wl_slider.setValue(wl_slider_initial_value)
                     wl_slider.setToolTip(f"调节窗位 ({initial_level:.2f})")
-                    if is_mask:
-                         wl_slider.setEnabled(False)
-                         wl_slider.setToolTip("Mask图像无需窗位调节")
                     wl_h_layout.addWidget(wl_label)
                     wl_h_layout.addWidget(wl_slider)
                     controls_v_layout.addLayout(wl_h_layout)
@@ -777,12 +830,15 @@ class MainWindow(QWidget):
                     self.image_list_layout.insertWidget(self.image_list_layout.count() - 1, item_widget)
 
                     visible_checkbox.stateChanged.connect(lambda state, data=image_data: self.toggle_image_visibility(state, data))
+                    opacity_slider.valueChanged.connect(lambda value, data=image_data: self.update_image_opacity(value, data))
+
+                    # Call helper to set initial slider enable/disable state
+                    self._update_item_control_states(image_data)
+
+                    # Connect WW/WL sliders only if not a mask initially (re-enabled by helper)
                     if not is_mask:
-                        opacity_slider.valueChanged.connect(lambda value, data=image_data: self.update_image_opacity(value, data))
-                        ww_slider.valueChanged.connect(lambda value, data=image_data: self.update_window_width(value, data))
-                        wl_slider.valueChanged.connect(lambda value, data=image_data: self.update_window_level(value, data))
-                    else:
-                         opacity_slider.valueChanged.connect(lambda value, data=image_data: self.update_image_opacity(value, data))
+                         ww_slider.valueChanged.connect(lambda value, data=image_data: self.update_window_width(value, data))
+                         wl_slider.valueChanged.connect(lambda value, data=image_data: self.update_window_level(value, data))
 
 
                 except Exception as e:
@@ -801,8 +857,6 @@ class MainWindow(QWidget):
 
         if cv2 is None:
             print("边缘填充功能需要 OpenCV 库，但它未安装。请运行 'pip install opencv-python' 进行安装。")
-            # Still proceed with contour extraction if skimage is available, but filling won't work
-            # The loop below uses skimage, so it's fine. The warning is printed.
 
         images_to_process = []
         for image_data in self.loaded_images:
@@ -822,7 +876,7 @@ class MainWindow(QWidget):
             img_shape = image_array.shape
             z_size = img_shape[0] if img_dimension > 2 else 1
 
-            image_data['contours'] = {} # Clear existing cached contours for this image
+            image_data['contours'] = {}
             print(f"提取 {os.path.basename(image_data.get('path', 'Unknown'))} 的边缘 ({z_size} 切片)...")
 
             for slice_index in range(z_size):
@@ -862,6 +916,7 @@ class MainWindow(QWidget):
 
         menu.exec_(self.sender().mapToGlobal(pos))
 
+
     def save_specific_image(self, image_data):
         print(f"尝试保存图像: {os.path.basename(image_data.get('path', 'Unknown'))}")
         if image_data and image_data.get('sitk_image'):
@@ -871,8 +926,10 @@ class MainWindow(QWidget):
             file_name_base, file_extension = os.path.splitext(default_file_name)
 
             options = QFileDialog.Options()
-            filters = "MHA Files (*.mha);;NRRD Files (*.nrrd);;所有文件 (*)"
+            options |= QFileDialog.DontUseNativeDialog
+            filters = self.IMAGE_FILE_FILTERS
             default_filter = f"{file_extension.upper().replace('.', '')} Files (*{file_extension})" if file_extension and file_extension.lower() in ['.mha', '.nrrd'] else "MHA Files (*.mha)"
+
 
             save_path, selected_filter = QFileDialog.getSaveFileName(
                 self, f"保存图像: {os.path.basename(original_path)}", default_file_name, filters, default_filter, options=options)
@@ -885,7 +942,6 @@ class MainWindow(QWidget):
                          save_path += ".mha"
 
                 try:
-                    # The sitk_image object reference in image_data should point to the potentially modified image
                     sitk.WriteImage(sitk_image, save_path)
                     print(f"图像保存成功到: {save_path}")
                 except Exception as e:
@@ -896,13 +952,11 @@ class MainWindow(QWidget):
         else:
             print("图像数据无效，无法保存")
 
+
     def toggle_image_visibility(self, state, image_data):
         image_data['is_visible'] = (state == Qt.Checked)
-        image_data['slider_opacity'].setEnabled(image_data['is_visible'])
-        if not image_data.get('is_mask', False):
-             image_data['slider_ww'].setEnabled(image_data['is_visible'])
-             image_data['slider_wl'].setEnabled(image_data['is_visible'])
-
+        # Use helper to update slider states
+        self._update_item_control_states(image_data)
         self.update_right_display()
 
     def update_image_opacity(self, value, image_data):
@@ -966,19 +1020,21 @@ class MainWindow(QWidget):
         else:
              self.axial_slice_info_label.setText("切片: -- / --")
 
-    def keyPressEvent(self, event: QKeyEvent):
-        super().keyPressEvent(event)
+    # Removed empty keyPressEvent method
 
+    # --- MainWindow's wheelEvent ---
     def wheelEvent(self, event):
         delta_y = event.angleDelta().y()
 
+        # Check if there's any loaded AND visible 3D image to slice through
         has_visible_3d = any(img_data.get('is_visible', False) and img_data.get('sitk_image') and img_data['sitk_image'].GetDimension() > 2 for img_data in self.loaded_images)
 
         if delta_y != 0 and has_visible_3d:
-            event.accept()
+            event.accept() # Accept the event as handled for slicing
 
             slice_direction = 1 if delta_y > 0 else -1
 
+            # Update the current slice index for all loaded AND visible 3D images
             for image_data in self.loaded_images:
                 if image_data.get('is_visible', False) and image_data.get('sitk_image') and image_data['sitk_image'].GetDimension() > 2:
                     current_slice = image_data.get('current_slice_index', 0)
@@ -986,19 +1042,43 @@ class MainWindow(QWidget):
                     new_slice = max(0, min(current_slice + slice_direction, z_size - 1))
                     image_data['current_slice_index'] = new_slice
 
-            # Clear dragging/selection state on slice change
-            self._is_dragging = False
-            self._selected_point = None
+            # --- Call public method on SliceDisplayLabel to clear state ---
+            # Instead of directly accessing private attributes
+            self.axial_view_label.clear_selection_and_dragging() # Use the new method
 
+
+            # Update the display on the right panel based on the new slice indices
             self.update_right_display()
 
         else:
+            # Pass the wheel event up if not handled for slicing (e.g., for scrolling)
             super().wheelEvent(event)
 
 
 # --- Application Launch Code ---
 if __name__ == "__main__":
+    print("--- Program Starting ---")
+    print("Creating QApplication...")
     app = QApplication(sys.argv)
-    main_window = MainWindow()
+    print("QApplication created successfully.")
+
+    print("Creating MainWindow instance...")
+    try:
+        main_window = MainWindow()
+        print("MainWindow instance created successfully.")
+    except Exception as e:
+        print(f"Error during MainWindow creation: {e}")
+        sys.exit(1) # Exit if MainWindow creation fails
+
+    print("Calling main_window.show()...")
     main_window.show()
-    sys.exit(app.exec_())
+    print("main_window.show() called.")
+
+    print("Starting application event loop (app.exec_())...")
+    try:
+        exit_code = app.exec_()
+        print(f"Application event loop finished with exit code {exit_code}.")
+        sys.exit(exit_code)
+    except Exception as e:
+        print(f"Error during application event loop: {e}")
+        sys.exit(1)
