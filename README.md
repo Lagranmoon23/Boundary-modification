@@ -1,5 +1,4 @@
-# Boundary-modification
-
+#Mask_Editor
 确保安装以下package
 
 pip install PyQt5 SimpleITK numpy scikit-image opencv-python
