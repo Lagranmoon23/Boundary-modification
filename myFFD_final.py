@@ -573,7 +573,7 @@ class MainWindow(QWidget):
         self.setWindowTitle("边界修改")
         self.setGeometry(100, 100, 1500, 800)
         # 请检查 'icon/icon1.png' 文件是否存在，路径是否正确，以及是否是有效的图像文件
-        self.setWindowIcon(QIcon("icon/icon1.png"))
+        self.setWindowIcon(QIcon("icon1.png"))
         print("MainWindow.initUI: Window title, geometry, icon set.")
 
         # 居中窗口
