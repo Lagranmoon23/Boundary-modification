@@ -566,7 +566,7 @@ class MainWindow(QWidget):
     def initUI(self):
         self.setWindowTitle("边界修改")
         self.setGeometry(100, 100, 1500, 800)
-        self.setWindowIcon(QIcon("icon/icon1.png"))
+        self.setWindowIcon(QIcon("icon1.png"))
 
         cnter_pos = QDesktopWidget().screenGeometry().center()
         self.move(int(cnter_pos.x() - self.width()/2), int(cnter_pos.y() - self.height()/2))
